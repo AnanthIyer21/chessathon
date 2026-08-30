@@ -7,8 +7,6 @@ runtime evaluates several positions per call.
 """
 import time
 
-import chess
-
 _VIRTUAL_LOSS = 1.0
 
 
@@ -32,6 +30,10 @@ class Searcher:
         root = _Node(1.0)
         priors, _ = self.evaluate([board])
         root.children = {m: _Node(p) for m, p in priors[0].items()}
+        if not root.children:
+            # Terminal root (checkmate/stalemate): no legal move exists to
+            # return. Fail fast instead of spinning batches until deadline.
+            raise ValueError("search() called on a position with no legal moves")
         if len(root.children) == 1:
             return next(iter(root.children))
 
