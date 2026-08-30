@@ -3,6 +3,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import torch
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -31,3 +32,31 @@ def test_train_smoke(tmp_path):
     )
     assert r.returncode == 0, r.stderr
     assert (out / "ckpt_final.pt").exists()
+
+
+def test_resume_uses_checkpoint_architecture(tmp_path):
+    make_fake_shard(tmp_path / "shard_00000.npz")
+    out = tmp_path / "ckpt"
+    r1 = subprocess.run(
+        [sys.executable, "-m", "train.train", "--shards", str(tmp_path),
+         "--epochs", "1", "--batch", "64", "--channels", "16", "--blocks", "1",
+         "--max-steps", "2", "--ckpt-dir", str(out), "--device", "cpu"],
+        capture_output=True, text=True, cwd=ROOT, timeout=300,
+    )
+    assert r1.returncode == 0, r1.stderr
+    ckpt_path = out / "ckpt_final.pt"
+    assert ckpt_path.exists()
+
+    r2 = subprocess.run(
+        [sys.executable, "-m", "train.train", "--shards", str(tmp_path),
+         "--epochs", "1", "--batch", "64", "--channels", "32", "--blocks", "2",
+         "--max-steps", "2", "--ckpt-dir", str(out), "--device", "cpu",
+         "--resume", str(ckpt_path)],
+        capture_output=True, text=True, cwd=ROOT, timeout=300,
+    )
+    assert r2.returncode == 0, r2.stderr
+    assert ckpt_path.exists()
+
+    state = torch.load(ckpt_path, map_location="cpu")
+    assert state["channels"] == 16
+    assert state["blocks"] == 1

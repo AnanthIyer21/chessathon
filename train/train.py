@@ -31,19 +31,30 @@ def main():
     assert paths, f"no shards in {args.shards}"
     os.makedirs(args.ckpt_dir, exist_ok=True)
 
-    net = PolicyValueNet(args.channels, args.blocks).to(args.device)
+    step = 0
+    channels, blocks = args.channels, args.blocks
+    state = None
+    if args.resume:
+        # Trained checkpoints record their architecture; trust that over
+        # flags so an unattended resume can't crash on a size mismatch.
+        state = torch.load(args.resume, map_location=args.device)
+        channels = state.get("channels", args.channels)
+        blocks = state.get("blocks", args.blocks)
+
+    net = PolicyValueNet(channels, blocks).to(args.device)
     optim = torch.optim.Adam(net.parameters(), lr=args.lr, weight_decay=1e-4)
     scaler = torch.amp.GradScaler(enabled=args.device == "cuda")
-    step = 0
-    if args.resume:
-        state = torch.load(args.resume, map_location=args.device)
+
+    if state is not None:
         net.load_state_dict(state["model"])
         optim.load_state_dict(state["optim"])
         step = state["step"]
+        print(f"resuming from {args.resume} at step {step} "
+              f"(channels={channels}, blocks={blocks})", flush=True)
 
     def save(name):
         torch.save({"model": net.state_dict(), "optim": optim.state_dict(),
-                    "step": step, "channels": args.channels, "blocks": args.blocks},
+                    "step": step, "channels": channels, "blocks": blocks},
                    os.path.join(args.ckpt_dir, name))
 
     t0 = time.time()
