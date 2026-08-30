@@ -10,7 +10,6 @@ priors and leaf evaluations also come exclusively from the network.
 import json
 import os
 import sys
-import time
 
 import chess
 import numpy as np
@@ -32,13 +31,18 @@ def evaluate(boards):
 
     Returns (priors, values): per board, a dict {legal move -> prior}
     (softmax over legal moves only) and the value in [-1, 1] from the
-    mover's perspective.
+    mover's perspective. For terminal boards (checkmate/stalemate), returns
+    an empty dict {} as priors (no legal moves).
     """
     planes = np.stack([encoding.board_to_planes(b) for b in boards])
     logits, values = _SESSION.run(None, {"planes": planes})
     priors = []
     for board, lg in zip(boards, logits):
         moves = list(board.legal_moves)
+        if not moves:
+            # Terminal board (checkmate/stalemate) has no legal moves.
+            priors.append({})
+            continue
         if board.turn == chess.WHITE:
             idx = [encoding.encode_move(m) for m in moves]
         else:
@@ -83,9 +87,13 @@ def main():
         line = line.strip()
         if not line:
             continue
-        req = json.loads(line)
-        move = get_move(req["fen"], int(req["time_left_ms"]))
-        print(json.dumps({"move": move}), flush=True)
+        try:
+            req = json.loads(line)
+            move = get_move(req["fen"], int(req["time_left_ms"]))
+            print(json.dumps({"move": move}), flush=True)
+        except Exception as exc:  # noqa: BLE001 - survive any parsing/format error
+            print(json.dumps({"move": "0000"}), flush=True)
+            print(f"wire protocol error: {exc!r}", file=sys.stderr)
 
 
 if __name__ == "__main__":
