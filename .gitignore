@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+data/raw/
+data/shards/
+train/checkpoints/
+dist/
+*.onnx
+!submission/model.onnx

@@ -1,0 +1,6 @@
+numpy
+python-chess
+onnxruntime
+pytest
+tqdm
+requests
