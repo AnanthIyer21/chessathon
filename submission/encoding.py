@@ -72,3 +72,61 @@ def array_to_planes(board64, meta):
 
 def board_to_planes(board: chess.Board):
     return array_to_planes(*board_to_array(board))
+
+
+# ---------------------------------------------------------------------------
+# Move encoding: AlphaZero's 8x8x73 scheme, flattened to movetype*64 + from_sq
+# (matching how the network's (73,8,8) policy output flattens).
+#   movetype 0-55:  "queen" moves, 8 directions x 7 distances
+#   movetype 56-63: knight moves
+#   movetype 64-72: underpromotions (3 directions x N/B/R); queen
+#                   promotions are encoded as plain forward/diagonal moves.
+# Moves must be oriented (mover plays up the board) before encoding.
+# ---------------------------------------------------------------------------
+
+_DIRS = [(1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1), (0, -1), (1, -1)]
+_DIR_IDX = {d: i for i, d in enumerate(_DIRS)}
+_KNIGHT = [(2, 1), (1, 2), (-1, 2), (-2, 1), (-2, -1), (-1, -2), (1, -2), (2, -1)]
+_KNIGHT_IDX = {d: i for i, d in enumerate(_KNIGHT)}
+_UNDERPROMO = [chess.KNIGHT, chess.BISHOP, chess.ROOK]
+
+
+def mirror_move(move: chess.Move) -> chess.Move:
+    """Map a move between the real board and its mirrored orientation."""
+    return chess.Move(chess.square_mirror(move.from_square),
+                      chess.square_mirror(move.to_square),
+                      promotion=move.promotion)
+
+
+def encode_move(move: chess.Move) -> int:
+    fr, fc = divmod(move.from_square, 8)
+    tr, tc = divmod(move.to_square, 8)
+    dr, dc = tr - fr, tc - fc
+    if move.promotion is not None and move.promotion != chess.QUEEN:
+        movetype = 64 + (dc + 1) * 3 + _UNDERPROMO.index(move.promotion)
+    elif (dr, dc) in _KNIGHT_IDX:
+        movetype = 56 + _KNIGHT_IDX[(dr, dc)]
+    else:
+        dist = max(abs(dr), abs(dc))
+        step = (dr // dist if dr else 0, dc // dist if dc else 0)
+        movetype = _DIR_IDX[step] * 7 + dist - 1
+    return movetype * 64 + move.from_square
+
+
+def decode_move(index: int, board: chess.Board) -> chess.Move:
+    movetype, from_sq = divmod(index, 64)
+    fr, fc = divmod(from_sq, 8)
+    if movetype >= 64:
+        u = movetype - 64
+        dc, piece = u // 3 - 1, _UNDERPROMO[u % 3]
+        return chess.Move(from_sq, (fr + 1) * 8 + fc + dc, promotion=piece)
+    if movetype >= 56:
+        dr, dc = _KNIGHT[movetype - 56]
+    else:
+        d, dist = divmod(movetype, 7)
+        dr, dc = _DIRS[d][0] * (dist + 1), _DIRS[d][1] * (dist + 1)
+    to_sq = (fr + dr) * 8 + fc + dc
+    promotion = None
+    if board.piece_type_at(from_sq) == chess.PAWN and to_sq >= 56:
+        promotion = chess.QUEEN
+    return chess.Move(from_sq, to_sq, promotion=promotion)
