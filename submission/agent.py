@@ -10,12 +10,14 @@ priors and leaf evaluations also come exclusively from the network.
 import json
 import os
 import sys
+import time
 
 import chess
 import numpy as np
 import onnxruntime as ort
 
 import encoding
+import mcts
 
 _MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "model.onnx")
 
@@ -60,8 +62,25 @@ def policy_move(board):
     return max(priors[0], key=priors[0].get)
 
 
+_SEARCHER = mcts.Searcher(evaluate, c_puct=1.5, batch_size=16)
+
+
+def _move_budget(time_left_ms: int) -> float:
+    """Seconds to spend on this move. 0.0 = single policy call.
+
+    Conservative by design: flagging loses outright, a slightly shallower
+    search only costs a little strength."""
+    t = time_left_ms / 1000.0
+    if t < 10.0:
+        return 0.0
+    return min(t / 30.0 + 0.35, t / 4.0, 4.0)
+
+
 def _choose(board, time_left_ms):
-    return policy_move(board)  # search is added in a later task
+    budget = _move_budget(time_left_ms)
+    if budget <= 0.0:
+        return policy_move(board)
+    return _SEARCHER.search(board, time.perf_counter() + budget)
 
 
 def get_move(fen: str, time_left_ms: int) -> str:
