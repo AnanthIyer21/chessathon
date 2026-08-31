@@ -38,8 +38,13 @@ PLAYERS = {"policy": lambda rng: policy_player,
            "material": material_player}
 
 
-def play(white, black, movetime, max_plies=300):
+def play(white, black, movetime, max_plies=300, opening_plies=0, opening_rng=None):
     board = chess.Board()
+    if opening_plies and opening_rng is not None:
+        for _ in range(opening_plies):
+            if board.is_game_over(claim_draw=True):
+                break
+            board.push(opening_rng.choice(list(board.legal_moves)))
     while not board.is_game_over(claim_draw=True) and board.ply() < max_plies:
         mover = white if board.turn == chess.WHITE else black
         board.push(mover(board, movetime))
@@ -55,12 +60,20 @@ def main():
     ap.add_argument("--b", required=True, choices=PLAYERS)
     ap.add_argument("--games", type=int, default=30)
     ap.add_argument("--movetime", type=float, default=1.0)
+    ap.add_argument("--random-opening-plies", type=int, default=4,
+                     help="play this many random legal moves (game-seeded) before the "
+                          "two players take over, so games don't collapse to a handful "
+                          "of deterministic replays")
     args = ap.parse_args()
     w = d = losses = 0
     for g in range(args.games):
         rng = random.Random(g)
         pa, pb = PLAYERS[args.a](rng), PLAYERS[args.b](rng)
-        s = play(pa, pb, args.movetime) if g % 2 == 0 else 1 - play(pb, pa, args.movetime)
+        op = args.random_opening_plies
+        if g % 2 == 0:
+            s = play(pa, pb, args.movetime, opening_plies=op, opening_rng=random.Random(g))
+        else:
+            s = 1 - play(pb, pa, args.movetime, opening_plies=op, opening_rng=random.Random(g))
         w += s == 1.0
         d += s == 0.5
         losses += s == 0.0
