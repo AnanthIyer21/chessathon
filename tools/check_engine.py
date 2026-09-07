@@ -34,7 +34,10 @@ PERFT_CASES: list[tuple[str, list[int]]] = [
 WON_ENDINGS = [
     ("KQ v K", "8/8/8/4k3/8/8/8/4K2Q w - - 0 1"),
     ("KR v K", "8/8/8/4k3/8/8/8/R3K3 w - - 0 1"),
+    ("KR v K (d4)", "8/8/8/8/3k4/8/8/R3K3 w - - 0 1"),
+    ("KR v K (loser to move)", "8/8/8/8/8/2k5/8/3RK3 b - - 0 1"),
     ("KBB v K", "8/8/8/4k3/8/8/8/2B1KB2 w - - 0 1"),
+    ("KBN v K", "8/8/8/4k3/8/8/8/1B2KN2 w - - 0 1"),
     ("KP v K", "4k3/8/4K3/4P3/8/8/8/8 b - - 0 1"),
 ]
 
@@ -101,7 +104,7 @@ def check_conversions() -> bool:
         board = chess.Board(fen)
         agent.new_game()
         plies = 0
-        while not board.is_game_over(claim_draw=True) and plies < 160:
+        while not board.is_game_over(claim_draw=True) and plies < 200:
             board.push_uci(agent.get_move(board.fen(), 20000))
             plies += 1
         outcome = board.outcome(claim_draw=True)

@@ -22,19 +22,21 @@ make gate      # ruff, mypy, and two games that have to finish cleanly
   found with `tools/find_magics.py`.
 - **Evaluation.** Tapered material plus piece-square tables, passed, isolated and doubled
   pawns, mobility, king safety (pawn shield and attack units), bishop pair, rooks on open
-  files, tempo, and a mop-up term for won endings.
+  files, tempo. In won pawnless endings a mop-up term drives the losing king to an edge (a
+  corner of the bishop's colour for bishop and knight) and rewards closing the net around it.
 - **Search.** Iterative deepening with aspiration windows, principal-variation search, a
-  transposition table of 2^22 entries, killer and history ordering, MVV-LVA captures, null-move
+  transposition table of 2^22 entries, killer and history ordering with a malus for quiet
+  moves that failed to cut, MVV-LVA captures, internal iterative reduction, null-move
   pruning, late-move reductions, futility and reverse-futility pruning, quiescence with delta
   pruning, repetition and insufficient-material detection, draw contempt.
 - **Time.** Per-move budget is `min(t/24 + 0.4 s, t/4) - 150 ms`. The clock is checked every
   2048 nodes and deepening stops once 45% of the budget is spent.
-- **Pondering.** After replying, a thread keeps searching the position handed to the opponent,
-  sharing the transposition table and history. The next `get_move` stops it first.
+- **No pondering.** The platform suspends the process while the opponent thinks, so searching
+  on their time earns nothing there. The code stays behind `PONDER = False`.
 - **Safety.** python-chess parses the FEN and validates the returned move. Any exception falls
   back to the best capture, then the first legal move. `get_move` never raises.
-- **Init.** Every jitted function is compiled at import by a warm-up search, so compilation
-  lands inside the init budget and never on the clock.
+- **Init.** Every jitted function is compiled at import by a warm-up search, about 7 s on an
+  M2, well inside the 90 s init budget.
 
 Correctness checks, independent of any search result:
 
@@ -42,8 +44,23 @@ Correctness checks, independent of any search result:
 uv run python tools/check_engine.py
 ```
 
-Known weakness: KR v K and KBB v K do not convert to mate in that checker (repetition and
-fifty-move draws). KQ v K and KP v K do.
+Bare-king wins still fail to convert about one time in four at a short clock (the
+evaluation goes flat while the rook shuffles). Three and four man Syzygy tablebases are
+allowed by the rules and would close that gap.
+
+## Measuring a change
+
+Keep the previous build as the opponent. `snapshots/stage6` is the build packaged on
+7 September; `snapshots/stage5` is the one that played the ladder before it.
+
+```
+uv run python -m harness.arena --opponent snapshots/stage6 --games 16
+```
+
+Sixteen games from the eight seeded openings give a 95% interval of about +-18%, so only
+a large change shows in one run. Batch 1 (this build) scored 65.6% against stage5. A second
+batch (an "improving" pruning guard, Manhattan mop-up distance, a longer iteration rule)
+scored 50.0% against this build and was dropped.
 
 ## What's here
 
@@ -54,7 +71,8 @@ tools/check_engine.py  perft, random-playout cross-check against python-chess, e
 tools/find_magics.py   regenerates the magic multipliers in agent.py
 snapshots/stage1/    pure-Python negamax over python-chess, material eval
 snapshots/stage4/    same plus numba-jitted tapered eval, TT, killers, quiescence (the 152nd-place agent)
-snapshots/stage5/    the bitboard engine, identical to the current agent.py
+snapshots/stage5/    the bitboard engine as it first played the ladder (6 Sep)
+snapshots/stage6/    the bitboard engine with batch 1, identical to the current agent.py
 baselines/           random, greedy, minimax, numba; each is a directory with an agent.py
 harness/runner.py    the process the platform runs your agent in
 harness/referee.py   the clock, legality, draw and adjudication rules
@@ -73,7 +91,7 @@ AGENTS.md            the contract, the footguns, and how to work in this repo
 ```
 make play FEN="<fen>"                              # start from a given position
 uv run python -m harness.play --black baselines/minimax --pgn game.pgn
-uv run python -m harness.arena --opponent snapshots/stage4 --games 20
+uv run python -m harness.arena --opponent snapshots/stage6 --games 16
 ```
 
 Anything the agent writes to stdout or stderr shows up under the result, so `print` debugging
