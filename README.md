@@ -72,6 +72,10 @@ batch (an "improving" pruning guard, Manhattan mop-up distance, a longer iterati
 scored 50.0% against this build and was dropped.
 Batch 3 (static exchange evaluation, continuation history, tablebases) scored 62.5%
 against batch 1. PeSTO tables then scored 68.8% (+10 =2 -4) against batch 3.
+A further search bundle (table score as eval, stronger null move, history pruning,
+razoring, quiescence table probe, aspiration tuning, reductions for losing captures) scored
+50.0% over 32 games against the PeSTO build and was not shipped; see
+`docs/engine-improvement-plan.md`.
 
 ## What's here
 

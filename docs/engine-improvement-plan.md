@@ -20,31 +20,41 @@ this build: 15 wins, 11 draws, 20 losses over rounds 54-99, rank 109 of about 40
 
 | # | Technique | Measured elsewhere | Expected here | Status |
 |---|---|---|---|---|
-| 1 | PeSTO piece-square tables and material | TSCP +200 | +80 to +150 | in test (v7) |
+| 1 | PeSTO piece-square tables and material | TSCP +200 | +80 to +150 | done: 68.8% (+10 =2 -4) vs batch 3 |
 | 2 | Static exchange evaluation: prune losing captures in quiescence, order good captures first, losing captures last, prune losing captures at depth <= 3 | Weiss +36/+25, int0x80 +44 | +40 to +60 | done (batch 3) |
 | 3 | 1-ply continuation history and counter-move, gravity-bounded scores | Weiss +45/+34, Ethereal +24/+35 | +30 to +50 | done (batch 3) |
-| 4 | Time manager: soft and hard limits, best-move stability, node share of the best move | Weiss +57/+36, Berserk +31/+28 | +20 to +40 | in test (v8) |
+| 4 | Time manager: soft and hard limits, best-move stability, node share of the best move | Weiss +57/+36, Berserk +31/+28 | +20 to +40 | Ethereal-style ideal t/20 + 1.25 inc with hard t/5 measured 28% on top of PeSTO (drains the clock, then starves); kept only the stability and node-share factors over the old t/24 budget |
 | 5 | History-steered late-move reductions | Weiss +14/+14 | +10 to +20 | done (batch 3, +-1 ply) |
-| 6 | Use the table score in place of static eval when its bound agrees | Weiss +11/+12 | +8 to +12 | in test (v8) |
-| 7 | Null move R = 4 + d/5 + min(3, (eval - beta)/191) | int0x80 +10, Berserk +12 | +10 to +20 | in test (v8) |
-| 8 | History pruning of quiet moves at depth <= 3 | Weiss +9/+11, int0x80 +21 | +5 to +15 | in test (v8) |
+| 6 | Use the table score in place of static eval when its bound agrees | Weiss +11/+12 | +8 to +12 | tested in the v11 bundle: 50% over 32 games vs PeSTO, not shipped |
+| 7 | Null move R = 4 + d/5 + min(3, (eval - beta)/191) | int0x80 +10, Berserk +12 | +10 to +20 | tested in the v11 bundle, not shipped |
+| 8 | History pruning of quiet moves at depth <= 3 | Weiss +9/+11, int0x80 +21 | +5 to +15 | tested in the v11 bundle, not shipped |
 | 9 | 3-4 man Syzygy tables at the root (4.3 MB) | conversion only | small, but wins that were draws | done |
-| 10 | Quiescence: per-move futility with endgame values, table probe and store, prune quiet check evasions | Weiss +34/+6, Ethereal +11/+3 | +15 to +25 | todo |
+| 10 | Quiescence: per-move futility with endgame values, table probe and store, prune quiet check evasions | Weiss +34/+6, Ethereal +11/+3 | +15 to +25 | table probe tested in the v11 bundle; futility and evasion pruning todo |
 | 11 | 2-ply continuation history | Weiss +14/+4 | +5 to +10 | todo |
 | 12 | Improving flag on reverse futility and late-move pruning counts | Berserk +12 | +5 to +12 | tested on LMR/LMP/futility: neutral; retry on RFP only |
-| 13 | Razoring at depth <= 3 | int0x80 +31, Ethereal +9 | +5 to +15 | todo |
-| 14 | Aspiration: delta 9 + score^2/16384, widen by a third | Weiss +14/+8 | +5 to +10 | todo |
+| 13 | Razoring at depth <= 3 | int0x80 +31, Ethereal +9 | +5 to +15 | tested in the v11 bundle (250/depth, depth <= 2), not shipped |
+| 14 | Aspiration: delta 9 + score^2/16384, widen by a third | Weiss +14/+8 | +5 to +10 | tested in the v11 bundle (12 + score^2/16384), not shipped |
 | 15 | Transposition table buckets with age | Weiss +17/+7 | +5 to +10 | todo |
 | 16 | Singular extensions and multi-cut | Weiss +12/+24 | +10 to +20 | todo, bug-prone |
 | 17 | Correction history (pawn and non-pawn) | int0x80 +8 and +17 | +10 to +20 | todo, needs pawn key |
 | 18 | ProbCut | Weiss +6/+7 | +5 to +8 | todo |
 | 19 | Evaluation: pawn and minor threats, passed-pawn king distance by rank, safe checks in king safety, rook on 7th, outposts | Weiss/Ethereal +3 to +13 each | +10 to +30 total | todo |
-| 20 | Reduce captures too; reduce less for checking moves | Weiss +12/+5, Berserk +14 | +5 to +15 | todo |
+| 20 | Reduce captures too; reduce less for checking moves | Weiss +12/+5, Berserk +14 | +5 to +15 | losing-capture reductions tested in the v11 bundle, not shipped |
 | 21 | Checks in the first quiescence ply | Berserk +5/+7 | 0 to +5 | skip |
 
 Not worth it on this platform: pondering (the process is frozen between moves), opening
 books (rated games start from curated positions), null-move verification and multi-cut
 alone (neutral in Berserk).
+
+## The v11 bundle
+
+Items 6, 7, 8, 13, 14, the quiescence table probe from 10 and the losing-capture
+reductions from 20 were tried together on top of PeSTO, first with an Ethereal-style clock
+(28%, the clock drains) and then with the conservative t/24 budget scaled by best-move
+stability and node share (v11): +5 =7 -4 and +4 =7 -5, 50.0% over 32 games. Every one of
+them is a measured gain elsewhere, so the likely reading is that they are small here and
+need hundreds of games each; that testing is the next step, one item at a time. The
+patches live in the session scratch area and are described in the commit history.
 
 ## How each step is judged
 
