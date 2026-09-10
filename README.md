@@ -11,7 +11,7 @@ under the contest clock from here.
 make setup     # uv sync
 make play      # one game against a baseline, real time control
 make arena     # 20 fast games, prints a score
-make zip       # rebuild submission.zip with agent.py at the root
+make zip       # rebuild submission.zip (agent.py plus syzygy/) and smoke it
 make gate      # ruff, mypy, and two games that have to finish cleanly
 ```
 
@@ -25,10 +25,17 @@ make gate      # ruff, mypy, and two games that have to finish cleanly
   files, tempo. In won pawnless endings a mop-up term drives the losing king to an edge (a
   corner of the bishop's colour for bishop and knight) and rewards closing the net around it.
 - **Search.** Iterative deepening with aspiration windows, principal-variation search, a
-  transposition table of 2^22 entries, killer and history ordering with a malus for quiet
-  moves that failed to cut, MVV-LVA captures, internal iterative reduction, null-move
-  pruning, late-move reductions, futility and reverse-futility pruning, quiescence with delta
-  pruning, repetition and insufficient-material detection, draw contempt.
+  transposition table of 2^22 entries, static exchange evaluation (losing captures are
+  pruned in quiescence, ordered last elsewhere and pruned near the leaves), ordering by
+  table move, winning captures, killers, counter move, then history plus one-ply
+  continuation history with gravity-bounded scores and a malus for moves that failed to
+  cut, history-steered late-move reductions, internal iterative reduction, null-move
+  pruning, futility and reverse-futility pruning, quiescence with delta pruning,
+  repetition and insufficient-material detection, draw contempt.
+- **Tablebases.** The 3 and 4 man Syzygy set (70 files, 4.3 MB, in `syzygy/`) is probed
+  once per move at the root when four men or fewer remain: quickest win, else a draw the
+  search may not throw away, else the slowest loss. The rules allow tablebases; nothing
+  is probed inside the search. Without the directory the engine plays as before.
 - **Time.** Per-move budget is `min(t/24 + 0.4 s, t/4) - 150 ms`. The clock is checked every
   2048 nodes and deepening stops once 45% of the budget is spent.
 - **No pondering.** The platform suspends the process while the opponent thinks, so searching
@@ -44,9 +51,9 @@ Correctness checks, independent of any search result:
 uv run python tools/check_engine.py
 ```
 
-Bare-king wins still fail to convert about one time in four at a short clock (the
-evaluation goes flat while the rook shuffles). Three and four man Syzygy tablebases are
-allowed by the rules and would close that gap.
+Without tablebases, bare-king wins failed to convert about one time in four at a short
+clock (the evaluation goes flat while the rook shuffles); the tables settle those exactly.
+The checker exercises the tables through the same `get_move` path.
 
 ## Measuring a change
 
@@ -72,7 +79,9 @@ tools/find_magics.py   regenerates the magic multipliers in agent.py
 snapshots/stage1/    pure-Python negamax over python-chess, material eval
 snapshots/stage4/    same plus numba-jitted tapered eval, TT, killers, quiescence (the 152nd-place agent)
 snapshots/stage5/    the bitboard engine as it first played the ladder (6 Sep)
-snapshots/stage6/    the bitboard engine with batch 1, identical to the current agent.py
+snapshots/stage6/    batch 1 (pondering off, mop-up, history malus, IIR), on the ladder 7-10 Sep
+syzygy/              3-4 man Syzygy tablebases (WDL and DTZ) from the lichess mirror
+docs/engine-improvement-plan.md  ranked, evidence-backed list of what is done and what is next
 baselines/           random, greedy, minimax, numba; each is a directory with an agent.py
 harness/runner.py    the process the platform runs your agent in
 harness/referee.py   the clock, legality, draw and adjudication rules

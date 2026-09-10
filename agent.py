@@ -2,15 +2,17 @@
 
 A bitboard chess engine compiled with numba: magic-bitboard move generation, copy-make, a
 tapered material-plus-piece-square evaluation, and a principal-variation search with a
-transposition table, killer and history ordering, null-move pruning, late-move reductions and a
-quiescence search. python-chess parses the FEN and double-checks the legality of the move we
-return, so an engine bug can cost a game but never forfeit it.
+transposition table, killer, counter-move and history ordering, static exchange evaluation,
+null-move pruning, late-move reductions and a quiescence search, with 3-4 man Syzygy tables
+consulted at the root. python-chess parses the FEN and double-checks the legality of the move
+we return, so an engine bug can cost a game but never forfeit it.
 
 Everything below runs single-threaded on one core. Every jitted function is compiled at import,
 inside the init budget, so the clock never pays for compilation.
 """
 
 import math
+import os
 import threading
 import time
 import traceback
@@ -18,6 +20,7 @@ from collections.abc import Callable
 from typing import cast
 
 import chess
+import chess.syzygy
 import numpy as np
 from llvmlite import ir
 from numba import float64, int64, njit, objmode
@@ -86,7 +89,8 @@ EMPTY = 12  # mailbox code for no piece; piece codes are colour * 6 + piece
 OCC_W, OCC_B, OCC_ALL = 12, 13, 14
 SIDE, EP, CASTLE, HALF, HASH = 15, 16, 17, 18, 19
 MAIL = 20
-POS_LEN = MAIL + 64
+LAST = MAIL + 64  # the move that produced this position; 0 at the root or after a null move
+POS_LEN = MAIL + 65
 
 CASTLE_WK, CASTLE_WQ, CASTLE_BK, CASTLE_BQ = 1, 2, 4, 8
 
@@ -495,6 +499,7 @@ def make_move(stack: np.ndarray, ply: int, tables: np.ndarray, move: int) -> Non
     src = stack[ply]
     dst = stack[ply + 1]
     dst[:] = src
+    dst[LAST] = move
     frm = move & 63
     to = (move >> 6) & 63
     promotion = (move >> 12) & 7
@@ -578,6 +583,7 @@ def make_move(stack: np.ndarray, ply: int, tables: np.ndarray, move: int) -> Non
 def make_null(stack: np.ndarray, ply: int, tables: np.ndarray) -> None:
     dst = stack[ply + 1]
     dst[:] = stack[ply]
+    dst[LAST] = 0
     h = dst[HASH] ^ tables[T_ZOB_SIDE]
     if dst[EP] >= 0:
         h ^= tables[T_ZOB_EP + (dst[EP] & 7)]
@@ -591,6 +597,74 @@ def make_null(stack: np.ndarray, ply: int, tables: np.ndarray) -> None:
 def left_king_in_check(stack: np.ndarray, ply: int, tables: np.ndarray, side: int) -> int:
     """After make_move from stack[ply], did side (the mover) leave its own king attacked?"""
     return attacked(stack[ply + 1], tables, lsb(stack[ply + 1, side * 6 + KING]), 1 - side)
+
+
+SEE_VALUE = np.array([100, 320, 330, 500, 900, 20000], dtype=np.int64)
+
+
+@njit(int64(int64[::1], int64[::1], int64, int64))
+def attackers_to(pos: np.ndarray, tables: np.ndarray, square: int, occupied: int) -> int:
+    """Every piece of either colour that attacks square, with sliders seeing through the
+    given occupancy so pieces removed during an exchange reveal the ones behind them."""
+    a = tables[T_PAWN + 64 + square] & pos[PAWN]
+    a |= tables[T_PAWN + square] & pos[6 + PAWN]
+    a |= tables[T_KNIGHT + square] & (pos[KNIGHT] | pos[6 + KNIGHT])
+    a |= tables[T_KING + square] & (pos[KING] | pos[6 + KING])
+    diagonal = pos[BISHOP] | pos[QUEEN] | pos[6 + BISHOP] | pos[6 + QUEEN]
+    straight = pos[ROOK] | pos[QUEEN] | pos[6 + ROOK] | pos[6 + QUEEN]
+    a |= bishop_attacks(tables, square, occupied) & diagonal
+    a |= rook_attacks(tables, square, occupied) & straight
+    return int(a & occupied)
+
+
+@njit(int64(int64[::1], int64[::1], int64, int64))
+def see_ge(pos: np.ndarray, tables: np.ndarray, move: int, threshold: int) -> int:
+    """Static exchange evaluation: does capturing on the target square, with both sides
+    recapturing with their least valuable piece, leave the mover at least threshold ahead?
+    Promotions and en passant are taken as good without looking. This is the usual swap
+    algorithm, run as a running balance so no gain list is needed."""
+    if (move >> 12) & 7 or ((move >> 15) & 3) == KIND_EP:
+        return 1
+    frm = move & 63
+    to = (move >> 6) & 63
+    victim = ((move >> 17) & 15) - 1
+    swap = (SEE_VALUE[victim] if victim >= 0 else 0) - threshold
+    if swap < 0:
+        return 0
+    swap = SEE_VALUE[pos[MAIL + frm] % 6] - swap
+    if swap <= 0:
+        return 1
+    occupied = pos[OCC_ALL] ^ (1 << frm) ^ (1 << to)
+    stm = pos[SIDE]
+    attackers = attackers_to(pos, tables, to, occupied)
+    result = 1
+    while True:
+        stm = 1 - stm
+        attackers &= occupied
+        mine = attackers & pos[OCC_W + stm]
+        if mine == 0:
+            break
+        result ^= 1
+        piece = PAWN
+        while piece < KING and mine & pos[stm * 6 + piece] == 0:
+            piece += 1
+        if piece == KING:
+            # The king may only capture if nothing is left to take it back.
+            if attackers & ~pos[OCC_W + stm] & occupied:
+                result ^= 1
+            break
+        swap = SEE_VALUE[piece] - swap
+        if swap < result:
+            break
+        bb = mine & pos[stm * 6 + piece]
+        occupied ^= bb & -bb
+        if piece in (PAWN, BISHOP, QUEEN):
+            diagonal = pos[BISHOP] | pos[QUEEN] | pos[6 + BISHOP] | pos[6 + QUEEN]
+            attackers |= bishop_attacks(tables, to, occupied) & diagonal
+        if piece in (ROOK, QUEEN):
+            straight = pos[ROOK] | pos[QUEEN] | pos[6 + ROOK] | pos[6 + QUEEN]
+            attackers |= rook_attacks(tables, to, occupied) & straight
+    return result
 
 
 @njit(int64(int64[:, ::1], int64, int64[::1], int64[:, ::1], int64))
@@ -916,10 +990,12 @@ def evaluate(pos: np.ndarray, tables: np.ndarray) -> int:
 # ---------------------------------------------------------------------------------------------
 # Search. Principal variation search with iterative deepening and aspiration windows at the
 # root. Inside: transposition table, check extension, internal iterative reduction, reverse
-# futility, null move, futility and late-move pruning, late move reductions, killer and
-# history ordering with a malus for quiet moves that failed to cut, and a capture-only
-# quiescence that also resolves checks. Move scores ride in the high bits of the move word so
-# ordering needs no second array. Mate scores count plies from the root: MATE - ply.
+# futility, null move, futility and late-move pruning, static-exchange pruning of losing
+# captures, late move reductions steered by history, and a capture-only quiescence that also
+# resolves checks. Ordering: table move, winning captures by MVV-LVA, killers, the counter
+# move, then quiet moves by history plus continuation history (both with a malus for moves
+# that failed to cut), losing captures last. Move scores ride in the high bits of the move
+# word so ordering needs no second array. Mate scores count plies from the root: MATE - ply.
 # ---------------------------------------------------------------------------------------------
 
 MATE = 30000
@@ -940,9 +1016,19 @@ CONTEMPT = 10  # a draw is worth this much less than an even position to the sid
 NODES_PER_CLOCK_CHECK = 2048
 
 ORDER_TT = 1 << 30
-ORDER_CAPTURE = 1 << 29
+ORDER_CAPTURE = 1 << 29  # captures that do not lose material by static exchange
 ORDER_KILLER = 1 << 28
-HISTORY_MAX = 1 << 26
+ORDER_BAD_CAPTURE = -(1 << 27)  # captures that lose material: after every quiet move
+
+# One flat history array. Main history is indexed by side and from-to square; the
+# counter-move table by side and the previous move's from-to; continuation history by the
+# (piece, to) of the previous move and the (piece, to) of this one. Scores are kept inside
+# +-HISTORY_LIMIT by the gravity update in history_bonus.
+H_MAIN = 0
+H_COUNTER = 2 * 4096
+H_CONT = H_COUNTER + 2 * 4096
+HISTORY_LEN = H_CONT + 768 * 768
+HISTORY_LIMIT = 16384
 
 FUTILITY_MARGIN = 120
 REVERSE_FUTILITY_MARGIN = 100
@@ -966,12 +1052,31 @@ def pick_move(moves: np.ndarray, ply: int, i: int, n: int) -> None:
         moves[ply, i], moves[ply, best] = moves[ply, best], moves[ply, i]
 
 
-@njit((ARR1, ARR2, int64, int64, int64, ARR1, ARR2))
+@njit((ARR1, int64, int64))
+def history_bonus(history: np.ndarray, slot: int, bonus: int) -> None:
+    """Gravity update: scores drift towards the bonus and never leave +-HISTORY_LIMIT."""
+    history[slot] += bonus - history[slot] * abs(bonus) // HISTORY_LIMIT
+
+
+@njit(int64(ARR1, int64))
+def previous_index(pos: np.ndarray, last: int) -> int:
+    """(piece, to) index of the move that produced pos, for continuation history."""
+    last_to = (last >> 6) & 63
+    return int(pos[MAIL + last_to] * 64 + last_to)
+
+
+@njit((ARR1, ARR1, ARR2, int64, int64, int64, ARR1, ARR2))
 def score_moves(
-    pos: np.ndarray, moves: np.ndarray, ply: int, n: int, tt_move: int, history: np.ndarray,
-    killers: np.ndarray,
+    pos: np.ndarray, tables: np.ndarray, moves: np.ndarray, ply: int, n: int, tt_move: int,
+    history: np.ndarray, killers: np.ndarray,
 ) -> None:
     side = pos[SIDE]
+    last = pos[LAST]
+    counter = 0
+    prev = -1
+    if last:
+        counter = history[H_COUNTER + side * 4096 + (last & 4095)]
+        prev = previous_index(pos, last)
     for i in range(n):
         move = moves[ply, i] & MOVE_MASK
         victim = ((move >> 17) & 15) - 1
@@ -980,9 +1085,10 @@ def score_moves(
             score = ORDER_TT
         elif victim >= 0:
             attacker = pos[MAIL + (move & 63)] - side * 6
-            score = ORDER_CAPTURE + 16 * (victim + 1) - attacker
+            score = 16 * (victim + 1) - attacker
             if promotion == QUEEN:
                 score += 64
+            score += ORDER_CAPTURE if see_ge(pos, tables, move, 0) else ORDER_BAD_CAPTURE
         elif promotion == QUEEN:
             score = ORDER_CAPTURE + 48
         elif promotion:
@@ -991,8 +1097,13 @@ def score_moves(
             score = ORDER_KILLER + 2
         elif move == killers[ply, 1]:
             score = ORDER_KILLER + 1
+        elif move == counter:
+            score = ORDER_KILLER
         else:
-            score = history[side * 4096 + (move & 4095)]
+            score = history[H_MAIN + side * 4096 + (move & 4095)]
+            if prev >= 0:
+                cur = pos[MAIL + (move & 63)] * 64 + ((move >> 6) & 63)
+                score += history[H_CONT + prev * 768 + cur]
         moves[ply, i] = move | (score << SCORE_SHIFT)
 
 
@@ -1070,12 +1181,14 @@ def quiesce(
         if best > alpha:
             alpha = best
         n = gen_moves(pos, tables, moves[ply], 1)
-    score_moves(pos, moves, ply, n, 0, history, killers)
+    score_moves(pos, tables, moves, ply, n, 0, history, killers)
     legal = 0
     for i in range(n):
         pick_move(moves, ply, i, n)
         move = moves[ply, i] & MOVE_MASK
         if not checked:
+            if moves[ply, i] >> SCORE_SHIFT < 0:
+                break  # the rest lose material by static exchange
             victim = ((move >> 17) & 15) - 1
             promotion = (move >> 12) & 7
             if promotion == 0 and victim >= 0 and best + MG_VALUE[victim] + QS_DELTA < alpha:
@@ -1184,7 +1297,7 @@ def negamax(
                 return score
 
     n = gen_moves(pos, tables, moves[ply], 0)
-    score_moves(pos, moves, ply, n, tt_move, history, killers)
+    score_moves(pos, tables, moves, ply, n, tt_move, history, killers)
     futile = not pv and not checked and depth <= 3 and (
         static_eval + FUTILITY_MARGIN * depth + 50 <= alpha
     )
@@ -1202,6 +1315,7 @@ def negamax(
             continue
         legal += 1
         gives_check = in_check(stack[ply + 1], tables)
+        order = moves[ply, i] >> SCORE_SHIFT
         if quiet:
             quiets += 1
             if legal > 1 and not gives_check and not pv:
@@ -1209,6 +1323,8 @@ def negamax(
                     continue
                 if depth <= 3 and quiets > 3 + 2 * depth * depth:
                     continue  # late move pruning: a quiet move this far down the list
+        elif order < 0 and legal > 1 and not gives_check and not pv and depth <= 3:
+            continue  # a capture that loses material, this close to the leaves
         new_depth = depth - 1
         if legal == 1:
             score = -negamax(
@@ -1221,6 +1337,11 @@ def negamax(
                 reduction = tables[T_LMR + min(depth, 63) * 64 + min(legal, 63)]
                 if pv:
                     reduction -= 1
+                # Moves with a strong history are reduced less, a poor one more.
+                if order > HISTORY_LIMIT // 2:
+                    reduction -= 1
+                elif order < -HISTORY_LIMIT // 2:
+                    reduction += 1
                 if reduction < 0:
                     reduction = 0
             score = -negamax(
@@ -1249,16 +1370,25 @@ def negamax(
                         if killers[ply, 0] != move:
                             killers[ply, 1] = killers[ply, 0]
                             killers[ply, 0] = move
-                        bonus = depth * depth
-                        slot = side * 4096 + (move & 4095)
-                        history[slot] += bonus
+                        bonus = min(depth * depth, 1024)
+                        last = pos[LAST]
+                        prev = previous_index(pos, last) if last else -1
+                        if last:
+                            history[H_COUNTER + side * 4096 + (last & 4095)] = move
+                        history_bonus(history, H_MAIN + side * 4096 + (move & 4095), bonus)
+                        if prev >= 0:
+                            cur = pos[MAIL + (move & 63)] * 64 + ((move >> 6) & 63)
+                            history_bonus(history, H_CONT + prev * 768 + cur, bonus)
+                        # The quiet moves tried before this one failed to cut: push them down.
                         for j in range(i):
                             earlier = moves[ply, j] & MOVE_MASK
                             if ((earlier >> 17) & 15) == 0 and ((earlier >> 12) & 7) == 0:
-                                history[side * 4096 + (earlier & 4095)] -= bonus
-                        if history[slot] > HISTORY_MAX:
-                            for j in range(8192):
-                                history[j] >>= 1
+                                history_bonus(
+                                    history, H_MAIN + side * 4096 + (earlier & 4095), -bonus
+                                )
+                                if prev >= 0:
+                                    cur = pos[MAIL + (earlier & 63)] * 64 + ((earlier >> 6) & 63)
+                                    history_bonus(history, H_CONT + prev * 768 + cur, -bonus)
                     break
 
     if legal == 0:
@@ -1289,7 +1419,7 @@ def search_root(
     pos = stack[0]
     side = pos[SIDE]
     n = gen_moves(pos, tables, moves[0], 0)
-    score_moves(pos, moves, 0, n, ctrl[C_ROOT_BEST], history, killers)
+    score_moves(pos, tables, moves, 0, n, ctrl[C_ROOT_BEST], history, killers)
     best = -INF
     best_move = 0
     legal = 0
@@ -1344,7 +1474,7 @@ MOVES_HORIZON = 24  # spend about this fraction of the remaining clock per move
 stack = np.zeros((MAX_PLY + 2, POS_LEN), dtype=np.int64)
 moves = np.zeros((MAX_PLY + 2, MAX_MOVES), dtype=np.int64)
 TT = np.zeros((TT_SIZE, 4), dtype=np.int64)
-HISTORY = np.zeros(2 * 4096, dtype=np.int64)
+HISTORY = np.zeros(HISTORY_LEN, dtype=np.int64)
 KILLERS = np.zeros((MAX_PLY + 2, 2), dtype=np.int64)
 CTRL = np.zeros(16, dtype=np.int64)
 CLOCK = np.zeros(2, dtype=np.float64)
@@ -1451,6 +1581,62 @@ def _fallback(board: chess.Board, legal: list[chess.Move]) -> chess.Move:
     return max(legal, key=gain)
 
 
+# Endgame tables. The rules allow tablebases, and the 3-4 man Syzygy set (4 MB, in syzygy/
+# next to this file) settles every position with four men or fewer exactly. It is consulted
+# once per move at the root, never inside the search, and the engine plays as before if the
+# directory is missing.
+TABLEBASE_MEN = 4
+_TABLEBASE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "syzygy")
+_TABLEBASE: chess.syzygy.Tablebase | None = None
+if os.path.isdir(_TABLEBASE_DIR):
+    try:
+        _TABLEBASE = chess.syzygy.open_tablebase(_TABLEBASE_DIR)
+    except Exception:  # a broken table set must not cost the game
+        traceback.print_exc()
+        _TABLEBASE = None
+
+TableKey = tuple[int, int, int]
+
+
+def _tablebase_ranking(board: chess.Board) -> dict[chess.Move, TableKey]:
+    """Every legal move keyed so that max() picks the table's choice: the result first
+    (win, draw, loss); among wins a capture or pawn move first, since distance-to-zeroing
+    restarts after one and a win must be forced within the fifty-move rule, then the fewest
+    plies; among losses the reverse, to hold out longest. Empty when the tables do not
+    cover the position, so the search decides."""
+    if (
+        _TABLEBASE is None
+        or chess.popcount(board.occupied) > TABLEBASE_MEN
+        or board.castling_rights
+    ):
+        return {}
+    ranking: dict[chess.Move, TableKey] = {}
+    for move in board.legal_moves:
+        zeroing = board.is_zeroing(move)
+        board.push(move)
+        try:
+            # Both probes speak for the side to move, which is now the opponent: negate.
+            wdl = -_TABLEBASE.probe_wdl(board)
+            dtz = -_TABLEBASE.probe_dtz(board)
+        except (KeyError, chess.syzygy.MissingTableError, IndexError):
+            return {}
+        finally:
+            board.pop()
+        prefer_zeroing = int(zeroing) if wdl > 0 else int(not zeroing)
+        ranking[move] = (wdl, prefer_zeroing, -dtz)
+    return ranking
+
+
+def _record(board: chess.Board, root_hash: int, move: chess.Move) -> str:
+    """Remember the root and the position after move for repetition detection, and
+    answer with the move. Used when the tables, not the search, chose it."""
+    _game.append(root_hash)
+    board.push(move)
+    _game.append(int(position_from_board(board, tables)[HASH]))
+    board.pop()
+    return move.uci()
+
+
 def _budget_ms(time_left_ms: int) -> float:
     budget = min(time_left_ms / MOVES_HORIZON + 0.8 * INCREMENT_MS, time_left_ms / 4.0)
     return max(budget - SAFETY_MS, 10.0)
@@ -1462,6 +1648,13 @@ def _think(board: chess.Board, time_left_ms: int) -> str:
     budget_s = _budget_ms(time_left_ms) / 1000.0
     stack[0] = position_from_board(board, tables)
     root_hash = int(stack[0, HASH])
+    ranking = _tablebase_ranking(board)
+    if ranking:
+        table_move = max(ranking, key=lambda m: ranking[m])
+        if ranking[table_move][0] != 0:
+            print(f"tablebase {table_move.uci()} wdl {ranking[table_move][0]}")
+            return _record(board, root_hash, table_move)
+        # A drawn position: the search picks the move, the tables veto one that loses.
     history_len = min(len(_game), len(GAME_HASHES))
     GAME_HASHES[:history_len] = _game[len(_game) - history_len :]
     CTRL[C_STOP] = 0
@@ -1474,7 +1667,8 @@ def _think(board: chess.Board, time_left_ms: int) -> str:
     CTRL[C_ROOT_SIDE] = int(stack[0, SIDE])
     CLOCK[0] = start + budget_s
     KILLERS[:] = 0
-    HISTORY[:] >>= 2
+    HISTORY[H_MAIN:H_COUNTER] >>= 2
+    HISTORY[H_CONT:] >>= 2
 
     best = 0
     score = 0
@@ -1511,6 +1705,12 @@ def _think(board: chess.Board, time_left_ms: int) -> str:
     if best == 0:  # never happens with a legal position, but never return nothing
         n = gen_moves(stack[0], tables, moves[0], 0)
         best = int(moves[0, 0] & MOVE_MASK) if n else 0
+    if ranking:
+        chosen = chess.Move.from_uci(move_to_uci(best))
+        if ranking.get(chosen, (0, 0, 0))[0] < 0:
+            safe = max(ranking, key=lambda m: ranking[m])
+            print(f"tablebase veto {chosen.uci()}, playing {safe.uci()}")
+            return _record(board, root_hash, safe)
     _game.append(root_hash)
     make_move(stack, 0, tables, best)
     _game.append(int(stack[1, HASH]))
