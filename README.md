@@ -20,9 +20,11 @@ make gate      # ruff, mypy, and two games that have to finish cleanly
 - **Move generation.** Magic bitboards for sliders, precomputed knight, king and pawn attack
   tables, copy-make on a flat int64 position array, Zobrist hashing. The magic constants were
   found with `tools/find_magics.py`.
-- **Evaluation.** Tapered material plus piece-square tables, passed, isolated and doubled
-  pawns, mobility, king safety (pawn shield and attack units), bishop pair, rooks on open
-  files, tempo. In won pawnless endings a mop-up term drives the losing king to an edge (a
+- **Evaluation.** PeSTO's tapered material and piece-square tables (Ronald Friederich's
+  Rofchade tables, published on chessprogramming.org; plain numbers, used the way the
+  Michniewski educational tables usually are), plus passed, isolated and doubled pawns,
+  mobility at half weight, king safety (pawn shield and attack units), bishop pair, rooks
+  on open files, tempo. In won pawnless endings a mop-up term drives the losing king to an edge (a
   corner of the bishop's colour for bishop and knight) and rewards closing the net around it.
 - **Search.** Iterative deepening with aspiration windows, principal-variation search, a
   transposition table of 2^22 entries, static exchange evaluation (losing captures are
@@ -68,6 +70,8 @@ Sixteen games from the eight seeded openings give a 95% interval of about +-18%,
 a large change shows in one run. Batch 1 (this build) scored 65.6% against stage5. A second
 batch (an "improving" pruning guard, Manhattan mop-up distance, a longer iteration rule)
 scored 50.0% against this build and was dropped.
+Batch 3 (static exchange evaluation, continuation history, tablebases) scored 62.5%
+against batch 1. PeSTO tables then scored 68.8% (+10 =2 -4) against batch 3.
 
 ## What's here
 
