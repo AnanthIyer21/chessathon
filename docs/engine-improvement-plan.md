@@ -66,6 +66,12 @@ before any arena: `tools/check_engine.py` (perft, movegen and hash cross-check a
 python-chess, won-ending conversion) and, for the exchange evaluator, attack sets compared
 with python-chess on 9,600 squares plus ten hand-built exchange positions.
 
+## What comes after the qualifier
+
+`docs/research-strength-path.md` is the deeper survey (papers, engine logs, measured numba
+and PyTorch numbers) with a one-to-three-week path: an SPRT harness, Texel tuning of the
+hand-written terms, then a 768 -> 128x2 -> 1 NNUE trained on self-play and lichess data.
+
 ## Platform facts that shaped the list
 
 One EPYC core slower than a laptop, 90 s init budget, 120 s + 0.5 s, process frozen
